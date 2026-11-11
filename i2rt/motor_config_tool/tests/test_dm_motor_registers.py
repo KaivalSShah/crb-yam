@@ -244,6 +244,46 @@ def test_a_read_still_requires_this_transactions_own_echo() -> None:
     assert read_register(can_if, 1, DMRegAddr.PMAX) == pytest.approx(math.pi, abs=1e-6)
 
 
+class _ScriptedBus:
+    """A ``can.BusABC`` stand-in whose ``recv`` replays a fixed list of frames, then times out."""
+
+    def __init__(self, frames: list[can.Message]) -> None:
+        self.frames = list(frames)
+
+    def recv(self, timeout: float | None = None) -> can.Message | None:
+        return self.frames.pop(0) if self.frames else None
+
+
+def test_receive_skips_our_own_transmit_echo() -> None:
+    """gs_usb hands every sent frame back (is_rx=False); a read request echoes the motor id and address,
+    so without this filter the request itself would decode as the reply -- a read of 0 from no motor."""
+    spec = REG_BY_ADDR[int(DMRegAddr.PMAX)]
+    request = can.Message(
+        arbitration_id=CAN_BROADCAST, data=bytearray([1, 0, 0x33, spec.addr, 0, 0, 0, 0]), is_rx=False
+    )
+    reply = can.Message(arbitration_id=CAN_BROADCAST, data=bytearray([1, 0, 0x33, spec.addr]) + b"\x00\x00\x48\x41")
+    iface = utils.RawCanInterface.__new__(utils.RawCanInterface)
+    iface.name = "test"
+    iface.bus = _ScriptedBus([request, reply])  # type: ignore[assignment]
+    assert iface.try_receive_message(1) is reply
+
+
+def test_receive_times_out_on_nothing_but_an_echo() -> None:
+    """Unplugged motor over gs_usb: only our echo comes back, which must read as silence, not a reply."""
+    echo = can.Message(arbitration_id=CAN_BROADCAST, data=bytearray([1, 0, 0x33, 21, 0, 0, 0, 0]), is_rx=False)
+    iface = utils.RawCanInterface.__new__(utils.RawCanInterface)
+    iface.name = "test"
+    iface.bus = _ScriptedBus([echo])  # type: ignore[assignment]
+    assert iface.try_receive_message(1) is None
+
+
+def test_bus_channel_passes_socketcan_names_through_and_indexes_gs_usb() -> None:
+    from i2rt.motor_config_tool.dm_motor_registers import _bus_channel
+
+    assert _bus_channel("can0", "socketcan") == {"channel": "can0"}
+    assert _bus_channel("1", "gs_usb") == {"channel": 1}
+
+
 def test_format_register_table_lists_every_register() -> None:
     lines = _format_register_table().splitlines()
     assert len(lines) == len(_DM_TABLE) + 2  # header + rule

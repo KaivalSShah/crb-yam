@@ -14,8 +14,9 @@ class RawCanInterface:
         bustype: str = "pcan",
         bitrate: int = 1000000,
         name: str = "default_can_interface",
+        **bus_kwargs: Any,  # backend-specific device selection, e.g. gs_usb's bus=/address=
     ):
-        self.bus = open_can_bus(channel, bustype, bitrate)
+        self.bus = open_can_bus(channel, bustype, bitrate, **bus_kwargs)
         self.busstate = self.bus.state
         self.name = name
 
@@ -73,7 +74,10 @@ class RawCanInterface:
         start_time = time.time()
         while (time.time() - start_time) < timeout:
             message = self.bus.recv(timeout=0.002)
-            if message:
+            # Skip our own transmit echoes. SocketCAN never delivers them to the sending socket, but
+            # gs_usb (the macOS path) returns every sent frame marked is_rx=False -- and a register
+            # read request echoes the motor id and address, so it would pass for the motor's reply.
+            if message and message.is_rx:
                 return message
         raise AssertionError(
             f"Failed to receive message, {self.name} motor id {motor_id} motor timeout. Check if the motor is powered on or if the motor ID exists."

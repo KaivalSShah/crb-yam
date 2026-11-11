@@ -1,6 +1,6 @@
 import logging
 import time
-from typing import List, Optional
+from typing import Any, List, Optional
 
 import can
 
@@ -9,17 +9,21 @@ from i2rt.motor_drivers.utils import ReceiveMode
 ETHERCAT_CHANNEL_PREFIX = "ecat:"
 
 
-def open_can_bus(channel: str, bustype: str = "socketcan", bitrate: int = 1000000) -> can.BusABC:
+def open_can_bus(
+    channel: str | int, bustype: str = "socketcan", bitrate: int = 1000000, **bus_kwargs: Any
+) -> can.BusABC:
     """A python-can bus on ``channel``.
 
     ``ecat:<nic>`` (or ``ecat:<nic>:<slave>:<can channel>``) opens one through an EtherCAT-to-CAN
     board on that NIC instead of a CAN adapter, so every CAN tool that takes a channel works there.
+    ``channel`` is an int for a gs_usb device index; ``bus_kwargs`` carry backend-specific device
+    selection, e.g. gs_usb's ``bus=``/``address=``.
     """
-    if channel.startswith(ETHERCAT_CHANNEL_PREFIX):
+    if isinstance(channel, str) and channel.startswith(ETHERCAT_CHANNEL_PREFIX):
         from i2rt.motor_drivers.ethercat_chain import EtherCATCanBus
 
         return EtherCATCanBus(channel)
-    return can.interface.Bus(bustype=bustype, channel=channel, bitrate=bitrate)
+    return can.interface.Bus(bustype=bustype, channel=channel, bitrate=bitrate, **bus_kwargs)
 
 
 class CanInterface:

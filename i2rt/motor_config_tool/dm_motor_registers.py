@@ -21,7 +21,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import Annotated, Callable, TypeAlias
+from typing import Annotated, Any, Callable, Literal, TypeAlias
 
 import can
 import tyro
@@ -492,10 +492,45 @@ def _format_register_table(values: dict[int, str] | None = None) -> str:
 BUS_ERRORS = (RuntimeError, can.CanError, OSError, AssertionError)
 
 
+Interface: TypeAlias = Literal["socketcan", "gs_usb"]
+
+
+def _bus_channel(channel: str, interface: Interface) -> dict[str, Any]:
+    """The python-can Bus arguments that select ``channel``: a name for SocketCAN, a device for gs_usb.
+
+    gs_usb is how a candleLight-firmware adapter is driven without SocketCAN (i.e. on macOS). It has no
+    interface names, so ``channel`` is either the adapter's USB serial number -- stable, preferred -- or its
+    position in ``GsUsb.scan()`` (``0``, ``1``, ...), which can change between runs.
+    """
+    if interface == "socketcan":
+        return {"channel": channel}
+    if channel.isdigit():
+        return {"channel": int(channel)}
+    from gs_usb.gs_usb import GsUsb
+
+    found = {dev.gs_usb.serial_number: dev.gs_usb for dev in GsUsb.scan()}
+    if channel not in found:
+        raise SystemExit(
+            f"no gs_usb adapter with serial {channel!r}; connected: {sorted(found) or 'none'}. Pass one of those "
+            "serials, or an index (0, 1, ...)."
+        )
+    # python-can opens a specific gs_usb device by USB bus + address rather than by serial.
+    return {"channel": channel, "bus": found[channel].bus, "address": found[channel].address}
+
+
 @contextmanager
-def _open_bus(channel: str) -> Iterator[RawCanInterface]:
-    """Open ``channel`` (SocketCAN, or ``ecat:<nic>``) as a ``RawCanInterface``; shut it down on the way out."""
-    iface = RawCanInterface(channel=channel, bustype="socketcan", name="dm_motor_registers")
+def _open_bus(channel: str, interface: Interface = "socketcan") -> Iterator[RawCanInterface]:
+    """Open ``channel`` (SocketCAN, ``ecat:<nic>``, or a gs_usb adapter) as a ``RawCanInterface``; shut it down on
+    the way out."""
+    bus_args = _bus_channel(channel, interface)
+    try:
+        iface = RawCanInterface(bustype=interface, name="dm_motor_registers", **bus_args)
+    except can.CanInterfaceNotImplementedError as e:
+        if interface != "gs_usb":
+            raise
+        raise SystemExit(
+            f"{e}\nThe gs_usb interface needs: uv pip install gs_usb pyusb (and brew install libusb)"
+        ) from e
     try:
         yield iface
     finally:
@@ -550,16 +585,23 @@ def _confirm(action: str, spec: RegSpec, motor_id: int, channel: str, detail: st
         raise SystemExit("aborted")
 
 
-def read(reg: Annotated[str, tyro.conf.Positional], motor_id: int, channel: str = "can0") -> None:
+def read(
+    reg: Annotated[str, tyro.conf.Positional],
+    motor_id: int,
+    channel: str = "can0",
+    interface: Interface = "socketcan",
+) -> None:
     """Read one register and print its value.
 
     Args:
         reg: Register name (e.g. sw_ver) or decimal address (e.g. 14); see list-registers.
         motor_id: CAN id of the motor.
-        channel: SocketCAN channel the motor chain is on, or ``ecat:<nic>`` through an EtherCAT-to-CAN board.
+        channel: SocketCAN channel the motor chain is on, ``ecat:<nic>`` through an EtherCAT-to-CAN board, or
+            with gs_usb the adapter serial (or index 0, 1, ...).
+        interface: socketcan (Linux) or gs_usb (a candleLight adapter without SocketCAN, e.g. macOS).
     """
     spec = _resolve_cli(reg)
-    with _open_bus(channel) as iface:
+    with _open_bus(channel, interface) as iface:
         value = read_register(iface, motor_id, spec.addr)
     fault = value_fault(spec, value)
     if fault:
@@ -567,15 +609,17 @@ def read(reg: Annotated[str, tyro.conf.Positional], motor_id: int, channel: str 
     print(f"{spec.name} (@{spec.addr}): {value}")
 
 
-def read_all(motor_id: int, channel: str = "can0") -> None:
+def read_all(motor_id: int, channel: str = "can0", interface: Interface = "socketcan") -> None:
     """Read every register and print one table. A register that fails shows ERR and the dump continues.
 
     Args:
         motor_id: CAN id of the motor.
-        channel: SocketCAN channel the motor chain is on, or ``ecat:<nic>`` through an EtherCAT-to-CAN board.
+        channel: SocketCAN channel the motor chain is on, ``ecat:<nic>`` through an EtherCAT-to-CAN board, or
+            with gs_usb the adapter serial (or index 0, 1, ...).
+        interface: socketcan (Linux) or gs_usb (a candleLight adapter without SocketCAN, e.g. macOS).
     """
     values: dict[int, str] = {}
-    with _open_bus(channel) as iface:
+    with _open_bus(channel, interface) as iface:
         for addr, name, _, _ in _DM_TABLE:
             try:
                 values[addr] = format_value(REG_BY_ADDR[addr], read_register(iface, motor_id, addr))
