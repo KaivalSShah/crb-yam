@@ -277,11 +277,20 @@ def test_receive_times_out_on_nothing_but_an_echo() -> None:
     assert iface.try_receive_message(1) is None
 
 
-def test_bus_channel_passes_socketcan_names_through_and_indexes_gs_usb() -> None:
+def test_bus_channel_maps_the_gs_usb_flag_onto_the_channel_prefix() -> None:
     from i2rt.motor_config_tool.dm_motor_registers import _bus_channel
 
-    assert _bus_channel("can0", "socketcan") == {"channel": "can0"}
-    assert _bus_channel("1", "gs_usb") == {"channel": 1}
+    assert _bus_channel("can0", "socketcan") == "can0"
+    assert _bus_channel("ecat:eth0", "socketcan") == "ecat:eth0"
+    assert _bus_channel("2091377E4546500A2", "gs_usb") == "gsusb:2091377E4546500A2"
+    assert _bus_channel("gsusb:1", "gs_usb") == "gsusb:1"  # already prefixed: not doubled
+    assert _bus_channel("gsusb:1", "socketcan") == "gsusb:1"  # the prefix alone selects gs_usb
+
+
+def test_gs_usb_index_needs_no_scan() -> None:
+    from i2rt.motor_drivers.can_interface import gs_usb_bus_kwargs
+
+    assert gs_usb_bus_kwargs("1") == {"channel": 1}
 
 
 def test_format_register_table_lists_every_register() -> None:

@@ -608,6 +608,26 @@ def test_a_non_socketcan_channel_refuses_rather_than_starting_unverified(
     assert chain_harness == []
 
 
+def test_a_gs_usb_channel_is_checked_and_built_like_a_socketcan_one(
+    chain_harness: list[tuple[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``gsusb:<serial>`` is a CAN adapter reached without SocketCAN (macOS): the checks must run on it, and
+    the chain must take the can0 branch -- the PCAN one drops ``control_mode`` and ``receive_mode``."""
+    from i2rt.motor_drivers import dm_driver
+
+    built: list[dict[str, Any]] = []
+
+    def _socket(*args: Any, **kwargs: Any) -> None:
+        built.append(kwargs)
+        raise _SocketOpened
+
+    monkeypatch.setattr(dm_driver, "DMSingleMotorCanInterface", _socket)
+    with pytest.raises(_SocketOpened):
+        _build(channel="gsusb:2091377E4546500A2", check_motor_types=True)
+    assert [channel for channel, _ in chain_harness] == ["gsusb:2091377E4546500A2"]
+    assert "control_mode" in built[0] and "receive_mode" in built[0]
+
+
 def test_an_unchecked_chain_still_builds_on_any_channel(chain_harness: list[tuple[str, Any]]) -> None:
     """The channel guard must fire only on a check that was *asked for*.
 

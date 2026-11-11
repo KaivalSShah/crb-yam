@@ -10,7 +10,7 @@ import can
 import numpy as np
 import tyro
 
-from i2rt.motor_drivers.can_interface import ETHERCAT_CHANNEL_PREFIX, CanInterface
+from i2rt.motor_drivers.can_interface import ETHERCAT_CHANNEL_PREFIX, GS_USB_CHANNEL_PREFIX, CanInterface
 from i2rt.motor_drivers.motor_check import run_startup_checks
 from i2rt.motor_drivers.utils import (
     DM_CLEAR_ERR,
@@ -429,7 +429,9 @@ class DMChainCanInterface(MotorChain):
             repair=True,
             expected_registers=expected_registers,
         )
-        if "can" in channel:
+        # gs_usb is a CAN adapter like can0, only reached without SocketCAN (open_can_bus routes it by prefix);
+        # it must take this branch, since the other one drops receive_mode and control_mode.
+        if "can" in channel or channel.startswith(GS_USB_CHANNEL_PREFIX):
             self.motor_interface = DMSingleMotorCanInterface(
                 channel=channel,
                 bustype="socketcan",
@@ -922,7 +924,8 @@ def main(
     "Zero command" is zero torque in MIT and zero velocity in VEL -- the two modes set_control encodes.
 
     Args:
-        channel: SocketCAN channel the motor chain is on.
+        channel: SocketCAN channel the motor chain is on, or gsusb:<adapter serial> for a gs_usb adapter
+            without SocketCAN (e.g. macOS, run with sudo).
         motor_id: CAN ids to bring up, in decimal -- ids on these buses are 1-9.
         motor_type: Motor type per CAN id, in the same order as --motor-id, since a real chain is mixed
             (a big_yam is DM6248 at joints 1-2, a yam_ultra_v2 DM4340 at joint 4). A single type is

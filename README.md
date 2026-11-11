@@ -25,13 +25,26 @@ uv venv --python 3.11
 source .venv/bin/activate
 ```
 
+**Linux**
+
 ```bash
 sudo apt update
 sudo apt install build-essential python3-dev linux-headers-$(uname -r)
 uv pip install -e .
 ```
 
+**macOS** — there is no SocketCAN, so the USB-CAN adapter (candleLight / `gs_usb` firmware) is driven
+directly over libusb:
+
+```bash
+brew install libusb
+uv pip install -e .
+uv pip install gs_usb pyusb
+```
+
 ## CAN Bus Setup
+
+### Linux (SocketCAN)
 
 ```bash
 # Check detected CAN devices
@@ -46,6 +59,43 @@ sudo sh devices/install_devices.sh
 # Reset unresponsive adapter
 sh scripts/reset_all_can.sh
 ```
+
+### macOS (gs_usb)
+
+On macOS the adapter has no interface name like `can0`. Instead, address it by its USB serial
+number with the channel `gsusb:<serial>` (or `gsusb:0`, `gsusb:1`, ... by scan index, which can change
+between runs). Nothing needs bringing up — the bitrate is set when the bus opens. Find the serial:
+
+```bash
+python -c "from gs_usb.gs_usb import GsUsb; print([d.gs_usb.serial_number for d in GsUsb.scan()])"
+```
+
+Claiming the USB device needs root, so run hardware commands with `sudo` and the venv's interpreter
+(`USBError 13 'Access denied'` means `sudo` was missing):
+
+```bash
+sudo .venv/bin/python i2rt/robots/motor_chain_robot.py --channel gsusb:<serial> --arm yam --gripper linear_4310
+```
+
+Any command below that takes `--channel can0` takes `--channel gsusb:<serial>` the same way.
+
+### Sanity check: view the arm live
+
+[`scripts/view_arm_live.py`](scripts/view_arm_live.py) mirrors a real arm's joint angles in the
+MuJoCo viewer. It only **reads** each motor's position register — no motor is enabled and nothing is
+commanded — so it is a safe first test that the adapter, wiring, motor IDs and model all line up.
+Move the arm by hand and the sim model should follow; a motor that does not answer shows as
+`no reply` in the terminal.
+
+```bash
+# macOS (mjpython is needed to open the MuJoCo viewer on macOS; it ships with the mujoco package)
+sudo .venv/bin/mjpython scripts/view_arm_live.py --channel <serial> --arm yam --gripper linear_4310
+
+# Linux
+python scripts/view_arm_live.py --interface socketcan --channel can0 --arm yam
+```
+
+`--gripper` only picks the model drawn on the flange; the gripper motor is not read.
 
 ## YAM Arm
 
@@ -292,6 +342,9 @@ python i2rt/motor_config_tool/dm_motor_registers.py list-registers
 # Read one register, or dump them all
 python i2rt/motor_config_tool/dm_motor_registers.py read sw_ver --motor-id 1 --channel can0
 python i2rt/motor_config_tool/dm_motor_registers.py read-all --motor-id 1 --channel can0
+
+# macOS: same commands through a gs_usb adapter
+sudo .venv/bin/python i2rt/motor_config_tool/dm_motor_registers.py read-all --motor-id 1 --channel gsusb:<serial>
 
 # Change a value: write puts it in RAM, save commits it to Flash
 python i2rt/motor_config_tool/dm_motor_registers.py write MAX_SPD --value 30.0 --motor-id 1

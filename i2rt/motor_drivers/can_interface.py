@@ -7,23 +7,50 @@ import can
 from i2rt.motor_drivers.utils import ReceiveMode
 
 ETHERCAT_CHANNEL_PREFIX = "ecat:"
+GS_USB_CHANNEL_PREFIX = "gsusb:"
 
 
-def open_can_bus(
-    channel: str | int, bustype: str = "socketcan", bitrate: int = 1000000, **bus_kwargs: Any
-) -> can.BusABC:
+def gs_usb_bus_kwargs(device: str) -> dict[str, Any]:
+    """python-can ``gs_usb`` Bus arguments selecting ``device``: an adapter serial, or a scan index.
+
+    gs_usb drives a candleLight-firmware adapter over libusb, with no SocketCAN (i.e. on macOS). The serial
+    is the stable choice; the index (``0``, ``1``, ...) is the adapter's position in ``GsUsb.scan()``, which
+    can change between runs.
+    """
+    if device.isdigit():
+        return {"channel": int(device)}
+    try:
+        from gs_usb.gs_usb import GsUsb
+    except ImportError as e:
+        raise can.CanInterfaceNotImplementedError(
+            "the gs_usb interface needs: uv pip install gs_usb pyusb (and brew install libusb)"
+        ) from e
+    found = {dev.gs_usb.serial_number: dev.gs_usb for dev in GsUsb.scan()}
+    if device not in found:
+        raise can.CanInitializationError(
+            f"no gs_usb adapter with serial {device!r}; connected: {sorted(found) or 'none'}. Pass one of "
+            "those serials, or an index (0, 1, ...)."
+        )
+    # python-can opens a specific gs_usb device by USB bus + address rather than by serial.
+    return {"channel": device, "bus": found[device].bus, "address": found[device].address}
+
+
+def open_can_bus(channel: str, bustype: str = "socketcan", bitrate: int = 1000000) -> can.BusABC:
     """A python-can bus on ``channel``.
 
     ``ecat:<nic>`` (or ``ecat:<nic>:<slave>:<can channel>``) opens one through an EtherCAT-to-CAN
     board on that NIC instead of a CAN adapter, so every CAN tool that takes a channel works there.
-    ``channel`` is an int for a gs_usb device index; ``bus_kwargs`` carry backend-specific device
-    selection, e.g. gs_usb's ``bus=``/``address=``.
+    ``gsusb:<serial>`` (or ``gsusb:<index>``) does the same through a gs_usb adapter without SocketCAN,
+    e.g. on macOS.
     """
-    if isinstance(channel, str) and channel.startswith(ETHERCAT_CHANNEL_PREFIX):
+    if channel.startswith(ETHERCAT_CHANNEL_PREFIX):
         from i2rt.motor_drivers.ethercat_chain import EtherCATCanBus
 
         return EtherCATCanBus(channel)
-    return can.interface.Bus(bustype=bustype, channel=channel, bitrate=bitrate, **bus_kwargs)
+    if channel.startswith(GS_USB_CHANNEL_PREFIX):
+        device = channel[len(GS_USB_CHANNEL_PREFIX) :]
+        return can.interface.Bus(interface="gs_usb", bitrate=bitrate, **gs_usb_bus_kwargs(device))
+    return can.interface.Bus(bustype=bustype, channel=channel, bitrate=bitrate)
 
 
 class CanInterface:
@@ -145,7 +172,9 @@ class CanInterface:
                 message = self.buffered_reader.get_message(timeout=0.001)
             else:
                 message = self.bus.recv(timeout=0.001)
-            if message:
+            # Skip our own transmit echoes: gs_usb (the macOS path) returns every sent frame marked
+            # is_rx=False, which SocketCAN never does. See RawCanInterface._receive_message.
+            if message and message.is_rx:
                 return message
         if not supress_warning:
             logging.warning(

@@ -20,7 +20,8 @@ whichever one remembered them:
   ``verify_motor_config`` from reporting three consequent mismatches, advising a ``PMAX`` rewrite, and
   writing ``CTRL_MODE`` to Flash on a motor whose repair is to be swapped.
 * **A check that was asked for and cannot run refuses**, rather than warning and letting the robot start
-  on a chain nobody verified. Both read registers over socketcan and nothing else.
+  on a chain nobody verified. Both read registers over socketcan, an EtherCAT-to-CAN board (``ecat:``),
+  or a gs_usb adapter (``gsusb:``), and nothing else.
 
 Three constraints shape both, and are why neither is a method on a running chain:
 
@@ -154,7 +155,7 @@ from i2rt.motor_config_tool.dm_motor_registers import (
     write_register,
 )
 from i2rt.motor_config_tool.utils import RawCanInterface
-from i2rt.motor_drivers.can_interface import ETHERCAT_CHANNEL_PREFIX
+from i2rt.motor_drivers.can_interface import ETHERCAT_CHANNEL_PREFIX, GS_USB_CHANNEL_PREFIX
 from i2rt.motor_drivers.utils import MotorType
 
 logger = logging.getLogger(__name__)
@@ -220,10 +221,14 @@ def _open_bus(channel: str, name: str, what: str) -> RawCanInterface:
     try:
         return RawCanInterface(channel=channel, bustype="socketcan", name=name)
     except BUS_ERRORS as e:
-        raise RuntimeError(
-            f"could not open {channel} to check the motor {what}: {e}. Check the interface is up "
-            f"(ip link show {channel})."
-        ) from e
+        if channel.startswith(GS_USB_CHANNEL_PREFIX):
+            hint = (
+                "Check the adapter is plugged in and nothing else has it open; on macOS, run with sudo "
+                "(USBError 13 'Access denied' means it was not)."
+            )
+        else:
+            hint = f"Check the interface is up (ip link show {channel})."
+        raise RuntimeError(f"could not open {channel} to check the motor {what}: {e}. {hint}") from e
 
 
 def run_startup_checks(
@@ -277,14 +282,14 @@ def run_startup_checks(
             "advise rewriting PMAX, and write CTRL_MODE to Flash on a motor whose repair is to be "
             "swapped out. Ask for both, or for neither."
         )
-    if "can" not in channel and not channel.startswith(ETHERCAT_CHANNEL_PREFIX):
+    if "can" not in channel and not channel.startswith((ETHERCAT_CHANNEL_PREFIX, GS_USB_CHANNEL_PREFIX)):
         raise ValueError(
             f"cannot check the motors on {channel!r}: both checks read registers over socketcan, and "
             "this is not a socketcan channel. Starting anyway would trust every motor's declared type "
             "and scaling unverified, which is the failure these checks exist to make loud -- so a check "
             "that was asked for and cannot run refuses instead of warning. Pass a socketcan channel "
-            f"(e.g. 'can0') or an EtherCAT-to-CAN one ('{ETHERCAT_CHANNEL_PREFIX}<nic>'), or ask for "
-            "neither check."
+            f"(e.g. 'can0'), an EtherCAT-to-CAN one ('{ETHERCAT_CHANNEL_PREFIX}<nic>'), a gs_usb adapter "
+            f"('{GS_USB_CHANNEL_PREFIX}<serial>'), or ask for neither check."
         )
     # check_motor_types is necessarily True here: neither-flag returned above, and config-without-types
     # was just refused. Positional, because the call signature is asserted that way by the tests.

@@ -14,9 +14,8 @@ class RawCanInterface:
         bustype: str = "pcan",
         bitrate: int = 1000000,
         name: str = "default_can_interface",
-        **bus_kwargs: Any,  # backend-specific device selection, e.g. gs_usb's bus=/address=
     ):
-        self.bus = open_can_bus(channel, bustype, bitrate, **bus_kwargs)
+        self.bus = open_can_bus(channel, bustype, bitrate)
         self.busstate = self.bus.state
         self.name = name
 

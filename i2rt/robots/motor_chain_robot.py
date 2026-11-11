@@ -862,7 +862,7 @@ class _CliArgs:
     gripper: str = "linear_4310"
     """Gripper variant."""
     channel: str = "can0"
-    """CAN channel."""
+    """CAN channel: a SocketCAN name (can0), or gsusb:<adapter serial> for a gs_usb adapter (e.g. macOS, sudo)."""
     operation_mode: Literal["gravity_comp", "test_gripper", "stay_current_qpos"] = "gravity_comp"
     """Operation mode: gravity compensation, gripper cycling, or holding the startup joint positions."""
     record: bool = False

@@ -21,7 +21,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import Annotated, Any, Callable, Literal, TypeAlias
+from typing import Annotated, Callable, Literal, TypeAlias
 
 import can
 import tyro
@@ -33,6 +33,7 @@ from i2rt.motor_config_tool.utils import (
     float32_to_bytes,
     uint32_to_bytes,
 )
+from i2rt.motor_drivers.can_interface import GS_USB_CHANNEL_PREFIX
 
 CAN_BROADCAST = 0x7FF
 CMD_READ = 0x33
@@ -495,42 +496,25 @@ BUS_ERRORS = (RuntimeError, can.CanError, OSError, AssertionError)
 Interface: TypeAlias = Literal["socketcan", "gs_usb"]
 
 
-def _bus_channel(channel: str, interface: Interface) -> dict[str, Any]:
-    """The python-can Bus arguments that select ``channel``: a name for SocketCAN, a device for gs_usb.
-
-    gs_usb is how a candleLight-firmware adapter is driven without SocketCAN (i.e. on macOS). It has no
-    interface names, so ``channel`` is either the adapter's USB serial number -- stable, preferred -- or its
-    position in ``GsUsb.scan()`` (``0``, ``1``, ...), which can change between runs.
-    """
-    if interface == "socketcan":
-        return {"channel": channel}
-    if channel.isdigit():
-        return {"channel": int(channel)}
-    from gs_usb.gs_usb import GsUsb
-
-    found = {dev.gs_usb.serial_number: dev.gs_usb for dev in GsUsb.scan()}
-    if channel not in found:
-        raise SystemExit(
-            f"no gs_usb adapter with serial {channel!r}; connected: {sorted(found) or 'none'}. Pass one of those "
-            "serials, or an index (0, 1, ...)."
-        )
-    # python-can opens a specific gs_usb device by USB bus + address rather than by serial.
-    return {"channel": channel, "bus": found[channel].bus, "address": found[channel].address}
+def _bus_channel(channel: str, interface: Interface) -> str:
+    """``channel`` as ``open_can_bus`` takes it: ``--interface gs_usb --channel X`` is ``gsusb:X``."""
+    if interface == "gs_usb" and not channel.startswith(GS_USB_CHANNEL_PREFIX):
+        return GS_USB_CHANNEL_PREFIX + channel
+    return channel
 
 
 @contextmanager
 def _open_bus(channel: str, interface: Interface = "socketcan") -> Iterator[RawCanInterface]:
-    """Open ``channel`` (SocketCAN, ``ecat:<nic>``, or a gs_usb adapter) as a ``RawCanInterface``; shut it down on
-    the way out."""
-    bus_args = _bus_channel(channel, interface)
+    """Open ``channel`` (SocketCAN, ``ecat:<nic>``, or ``gsusb:<serial>``) as a ``RawCanInterface``; shut it down
+    on the way out."""
     try:
-        iface = RawCanInterface(bustype=interface, name="dm_motor_registers", **bus_args)
-    except can.CanInterfaceNotImplementedError as e:
-        if interface != "gs_usb":
+        iface = RawCanInterface(
+            channel=_bus_channel(channel, interface), bustype="socketcan", name="dm_motor_registers"
+        )
+    except (can.CanInterfaceNotImplementedError, can.CanInitializationError) as e:
+        if interface != "gs_usb" and not channel.startswith(GS_USB_CHANNEL_PREFIX):
             raise
-        raise SystemExit(
-            f"{e}\nThe gs_usb interface needs: uv pip install gs_usb pyusb (and brew install libusb)"
-        ) from e
+        raise SystemExit(str(e)) from e  # a missing package or adapter, not a crash: say so without a traceback
     try:
         yield iface
     finally:
