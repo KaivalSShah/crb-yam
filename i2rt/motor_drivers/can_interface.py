@@ -49,8 +49,54 @@ def open_can_bus(channel: str, bustype: str = "socketcan", bitrate: int = 100000
         return EtherCATCanBus(channel)
     if channel.startswith(GS_USB_CHANNEL_PREFIX):
         device = channel[len(GS_USB_CHANNEL_PREFIX) :]
-        return can.interface.Bus(interface="gs_usb", bitrate=bitrate, **gs_usb_bus_kwargs(device))
+        return _open_gs_usb_bus(bitrate, **gs_usb_bus_kwargs(device))
     return can.interface.Bus(bustype=bustype, channel=channel, bitrate=bitrate)
+
+
+# A gs_usb adapter does not survive being closed and reopened in one process (macOS, bench
+# 2026-11-12). A plain reopen hangs in libusb; releasing the USB handle and pausing first gets the
+# reopen through, but the reopened adapter still loses replies -- a robot start (type check, config
+# check, then the chain: three opens) failed to enable a different motor each run, while a single
+# open answered 2100/2100 register reads. So the adapter is opened once per process and shared: a
+# caller's shutdown() only hands it back, and the USB handle is released when the process exits.
+_gs_usb_buses: dict[tuple, can.BusABC] = {}
+
+
+def _open_gs_usb_bus(bitrate: int, **kwargs: Any) -> can.BusABC:
+    """The process's one python-can gs_usb bus for this adapter, opened on first use."""
+    key = (bitrate, *sorted(kwargs.items()))
+    bus = _gs_usb_buses.get(key)
+    if bus is not None:
+        # Hand-over between users (e.g. startup checks -> chain): drop frames meant for the last one.
+        while bus.recv(timeout=0.005) is not None:
+            pass
+        return bus
+
+    import atexit
+
+    import usb.util
+    from can.interfaces.gs_usb import GsUsbBus
+
+    class _SharedGsUsbBus(GsUsbBus):
+        def shutdown(self) -> None:
+            """Kept open for the next user in this process; really closed at exit."""
+
+        def _close(self) -> None:
+            if self._is_shutdown:
+                return
+            try:
+                GsUsbBus.shutdown(self)
+            finally:
+                usb.util.dispose_resources(self.gs_usb.gs_usb)
+
+    bus = _SharedGsUsbBus(bitrate=bitrate, **kwargs)
+    _gs_usb_buses[key] = bus
+    atexit.register(bus._close)
+    return bus
+
+
+def _frame_str(msg: Optional[can.Message]) -> str:
+    return "nothing" if msg is None else f"0x{msg.arbitration_id:x} [{bytes(msg.data).hex(' ')}]"
 
 
 class CanInterface:
@@ -94,19 +140,29 @@ class CanInterface:
             can.Message: The message that was sent.
         """
         message = can.Message(arbitration_id=id, data=data, is_extended_id=False)
+        attempts: List[str] = []  # what each try got back, for the failure message
         for _ in range(max_retry):
             try:
                 # logging.info("Sending message: %s at %f", message, time.time())
                 self.bus.send(message)
-                response = self._receive_message(motor_id, timeout=0.01)
-                # logging.info("Received response: %s at %f", response, time.time())
-
                 if expected_id is None:
                     expected_id = self.receive_mode.get_receive_id(motor_id)
-                if response and (expected_id == response.arbitration_id):
-                    return response
-                self.try_receive_message(id)
+                # Skip other motors' frames until this one answers. Stale replies can be queued ahead of
+                # it -- motor_on's clear-error retries leave several behind (bench, gs_usb on macOS) --
+                # and taking only the first frame then failed the next motor on every retry.
+                skipped: List[can.Message] = []
+                deadline = time.time() + 0.01
+                while (remaining := deadline - time.time()) > 0:
+                    response = self._receive_message(motor_id, timeout=remaining)
+                    if response.arbitration_id == expected_id:
+                        return response
+                    skipped.append(response)
+                attempts.append(
+                    f"no 0x{expected_id:x} reply; skipped {len(skipped)} other frame(s)"
+                    + (f", last {_frame_str(skipped[-1])}" if skipped else "")
+                )
             except (can.CanError, AssertionError) as e:
+                attempts.append(f"{type(e).__name__}: {e}")
                 logging.warning(e)
                 logging.warning(
                     "\033[91m"
@@ -115,7 +171,8 @@ class CanInterface:
                 )
             time.sleep(0.001)
         raise AssertionError(
-            f"fail to communicate with the motor {id} on {self.name} at can channel {self.bus.channel_info}"
+            f"fail to communicate with the motor {id} on {self.name} at can channel {self.bus.channel_info}; "
+            + "; ".join(f"try {i + 1}: {a}" for i, a in enumerate(attempts))
         )
 
     def try_receive_message(self, motor_id: Optional[int] = None, timeout: float = 0.009) -> Optional[can.Message]:

@@ -559,6 +559,7 @@ class DMChainCanInterface(MotorChain):
             return
         logging.info("starting separate thread for control loop")
         thread = threading.Thread(target=self._set_torques_and_update_state)
+        self._control_thread = thread
         thread.start()
         self.start_thread_flag = True
         time.sleep(0.1)
@@ -785,6 +786,14 @@ class DMChainCanInterface(MotorChain):
 
     def close(self) -> None:
         self.running = False
+        # Let the control loop finish its in-flight cycle before the bus goes away. Closing under it
+        # leaves it sending on a dead bus; on gs_usb (macOS) that also re-claims the USB device and
+        # hangs interpreter exit, and the adapter then drops motors on the next launch.
+        thread = getattr(self, "_control_thread", None)
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=1.0)
+            if thread.is_alive():
+                logging.warning(f"{self}: control loop did not stop within 1 s; closing the bus anyway")
         self.motor_interface.close()
 
 
