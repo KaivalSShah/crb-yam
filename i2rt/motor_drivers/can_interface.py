@@ -153,7 +153,10 @@ class CanInterface:
                 skipped: List[can.Message] = []
                 deadline = time.time() + 0.01
                 while (remaining := deadline - time.time()) > 0:
-                    response = self._receive_message(motor_id, timeout=remaining)
+                    # None on timeout (this class's _receive_message does not raise): retry the send.
+                    response = self._receive_message(motor_id, timeout=remaining, supress_warning=True)
+                    if response is None:
+                        break
                     if response.arbitration_id == expected_id:
                         return response
                     skipped.append(response)
