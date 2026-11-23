@@ -148,8 +148,15 @@ def bl_list_connected_devices(bus: can.BusABC, timeout: float = 0.1) -> set[int]
 
 
 def get_can_bus(channel: str, bitrate: int = 1000000) -> can.BusABC:
-    """Open a SocketCAN bus on ``channel`` (e.g. ``can0``)."""
-    return can.interface.Bus(interface="socketcan", channel=channel, bitrate=bitrate)
+    """Open ``channel``: a SocketCAN name (``can0``), or ``gsusb:<serial>`` on macOS.
+
+    The teaching-handle check opens its own bus through here, before the motor chain's reader
+    starts. ``gsusb:`` has to take the shared adapter open; a second SocketCAN-style open is what
+    macOS rejects with "Protocol not supported".
+    """
+    from i2rt.motor_drivers.can_interface import open_can_bus
+
+    return open_can_bus(channel, bitrate=bitrate)
 
 
 def encoder_list_devices(bus: can.BusABC, timeout: float = 0.1) -> set[int]:

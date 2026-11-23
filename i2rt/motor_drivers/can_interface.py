@@ -1,4 +1,6 @@
 import logging
+import math
+import threading
 import time
 from typing import Any, List, Optional
 
@@ -62,24 +64,138 @@ def open_can_bus(channel: str, bustype: str = "socketcan", bitrate: int = 100000
 _gs_usb_buses: dict[tuple, can.BusABC] = {}
 
 
+def gs_usb_read_timeout(timeout: Optional[float]) -> Optional[float]:
+    """A recv timeout gs_usb cannot turn into "block forever".
+
+    python-can's gs_usb reader passes ``round(timeout * 1000)`` ms to libusb, and libusb reads 0 ms
+    as no timeout at all. So any wait under 0.5 ms -- the tail of a ``deadline - now`` loop, e.g. the
+    teaching handle's 1 s version probe -- blocked inside libusb, where Ctrl+C cannot reach it. Round
+    such waits up to whole milliseconds instead. None and 0 already map to python-can's 1 ms poll.
+    """
+    if timeout is None or timeout <= 0:
+        return timeout
+    return max(0.001, math.ceil(timeout * 1000) / 1000)
+
+
+_GS_USB_DRIVER_SETTLE_S = 1.0
+_gs_usb_start_lock = threading.Lock()
+
+
+def _gs_usb_start_without_root(self: Any, flags: Optional[int] = None) -> None:
+    """``GsUsb.start`` without the step that needs root on macOS; otherwise the same.
+
+    gs_usb's start USB-resets the adapter (the clean start that replaces unplugging it) and then
+    detaches any kernel driver it finds. A macOS reset re-enumerates the device, which for a moment
+    reports a kernel driver -- gone within 50 ms (bench, 2026-11-23) -- and detaching it is what
+    required sudo ("USBError 13 Access denied"). So on macOS this waits that driver out instead.
+    Linux keeps the detach: its gs_usb kernel driver is real and stays.
+    """
+    import platform
+
+    import usb.core
+    from gs_usb.constants import (
+        GS_CAN_MODE_HW_TIMESTAMP,
+        GS_CAN_MODE_LISTEN_ONLY,
+        GS_CAN_MODE_LOOP_BACK,
+        GS_CAN_MODE_NORMAL,
+        GS_CAN_MODE_ONE_SHOT,
+    )
+    from gs_usb.gs_usb import _GS_USB_BREQ_MODE, GS_CAN_MODE_START
+    from gs_usb.gs_usb_structures import DeviceMode
+
+    if flags is None:
+        flags = GS_CAN_MODE_NORMAL | GS_CAN_MODE_HW_TIMESTAMP
+    device = self.gs_usb
+    device.reset()
+    system = platform.system()
+    if system == "Darwin":
+        deadline = time.monotonic() + _GS_USB_DRIVER_SETTLE_S
+        while True:
+            try:
+                active = device.is_kernel_driver_active(0)
+            except usb.core.USBError:
+                active = True  # still re-enumerating
+            if not active:
+                break
+            if time.monotonic() > deadline:
+                device.detach_kernel_driver(0)  # a driver that stayed: needs root, as before
+                break
+            time.sleep(0.01)
+    elif system != "Windows" and device.is_kernel_driver_active(0):
+        device.detach_kernel_driver(0)
+
+    flags &= self.device_capability.feature
+    flags &= GS_CAN_MODE_LISTEN_ONLY | GS_CAN_MODE_LOOP_BACK | GS_CAN_MODE_ONE_SHOT | GS_CAN_MODE_HW_TIMESTAMP
+    self.device_flags = flags
+    device.ctrl_transfer(0x41, _GS_USB_BREQ_MODE, 0, 0, DeviceMode(GS_CAN_MODE_START, flags).pack())
+
+
 def _open_gs_usb_bus(bitrate: int, **kwargs: Any) -> can.BusABC:
     """The process's one python-can gs_usb bus for this adapter, opened on first use."""
     key = (bitrate, *sorted(kwargs.items()))
     bus = _gs_usb_buses.get(key)
     if bus is not None:
-        # Hand-over between users (e.g. startup checks -> chain): drop frames meant for the last one.
+        # Hand-over between users (e.g. startup checks -> chain): clear any receive filter the last one
+        # set, and drop frames meant for it.
+        bus.set_filters(None)
         while bus.recv(timeout=0.005) is not None:
             pass
         return bus
 
     import atexit
 
+    import usb.core
     import usb.util
     from can.interfaces.gs_usb import GsUsbBus
+    from gs_usb.gs_usb_frame import (
+        GS_USB_FRAME_SIZE,
+        GS_USB_FRAME_SIZE_HW_TIMESTAMP,
+        GS_USB_NONE_ECHO_ID,
+        GsUsbFrame,
+    )
 
     class _SharedGsUsbBus(GsUsbBus):
         def shutdown(self) -> None:
-            """Kept open for the next user in this process; really closed at exit."""
+            """Kept open for the next user in this process; really closed at exit.
+
+            Clears the caller's receive filters: on SocketCAN each open is its own socket, so a filter
+            dies with it, but here every user shares this one bus. The teaching-handle check filters to
+            encoder ids only, and left in place that hid every motor reply from the chain -- whose bus
+            was opened first, so a reset on the next open alone would not reach it.
+            """
+            self.set_filters(None)
+
+        def _recv_internal(self, timeout: Optional[float]) -> Any:
+            """python-can's read, but each frame decoded by its own length.
+
+            gs_usb frames are 24 bytes with a hardware timestamp and 20 without. python-can unpacks
+            every frame at the size the device was opened with, so a 20-byte frame -- which this
+            adapter sends right after another process has used it (bench, 2026-11-23) -- raised
+            "unpack requires a buffer of 24 bytes" and killed whichever script opened it next.
+            """
+            timeout = gs_usb_read_timeout(timeout)
+            timeout_ms = round(timeout * 1000) if timeout else 1
+            try:
+                data = self.gs_usb.gs_usb.read(0x81, GS_USB_FRAME_SIZE_HW_TIMESTAMP, timeout_ms)
+            except usb.core.USBError:
+                return None, False
+            if len(data) not in (GS_USB_FRAME_SIZE, GS_USB_FRAME_SIZE_HW_TIMESTAMP):
+                logging.debug("gs_usb: dropped a %d-byte USB packet", len(data))
+                return None, False
+            frame = GsUsbFrame()
+            GsUsbFrame.unpack_into(frame, bytes(data), len(data) == GS_USB_FRAME_SIZE_HW_TIMESTAMP)
+            msg = can.Message(
+                timestamp=frame.timestamp,
+                arbitration_id=frame.arbitration_id,
+                is_extended_id=frame.is_extended_id,
+                is_remote_frame=frame.is_remote_frame,
+                is_error_frame=frame.is_error_frame,
+                channel=self.channel_info,
+                dlc=frame.can_dlc,
+                data=bytearray(frame.data)[0 : frame.can_dlc],
+                is_rx=frame.echo_id == GS_USB_NONE_ECHO_ID,
+            )
+            return msg, False
 
         def _close(self) -> None:
             if self._is_shutdown:
@@ -89,7 +205,17 @@ def _open_gs_usb_bus(bitrate: int, **kwargs: Any) -> can.BusABC:
             finally:
                 usb.util.dispose_resources(self.gs_usb.gs_usb)
 
-    bus = _SharedGsUsbBus(bitrate=bitrate, **kwargs)
+    # python-can's GsUsbBus calls GsUsb.start() on a device it creates itself, so the root-free start
+    # is swapped in for just this construction.
+    from gs_usb.gs_usb import GsUsb
+
+    with _gs_usb_start_lock:
+        original_start = GsUsb.start
+        GsUsb.start = _gs_usb_start_without_root
+        try:
+            bus = _SharedGsUsbBus(bitrate=bitrate, **kwargs)
+        finally:
+            GsUsb.start = original_start
     _gs_usb_buses[key] = bus
     atexit.register(bus._close)
     return bus
