@@ -1,0 +1,20 @@
+{
+  "overhead": {
+    "blur_sigma": 0.0,
+    "noise_sigma": 1.9,
+    "latency": 0.081,
+    "jpeg_quality": 95,
+    "sharpen": 0.35
+  },
+  "right_wrist": {
+    "blur_sigma": 0.0,
+    "noise_sigma": 2.6,
+    "auto_exposure": 0.3,
+    "exposure_target": 96.0,
+    "flicker": 0.025,
+    "latency": 0.054,
+    "jpeg_quality": 95,
+    "sharpen": 0.4
+  },
+  "notes": "Measured from the recorded footage. noise_sigma: high-frequency standard deviation of a flat table patch. flicker: frame-to-frame brightness variation of that patch. auto_exposure / exposure_target: how the wrist frames' mean brightness tracks the unexposed simulated ones. sharpen: unsharp-mask strength at which the strongest edges are as steep as in the footage (the overhead webcam sharpens; the wrist value is a compromise, its footage has more fine texture than the simulation). jpeg_quality: the recorder's. latency: calibration/latency.py."
+}

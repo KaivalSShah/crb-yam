@@ -1,0 +1,11 @@
+{
+  "ambient": 0.62,
+  "count": 5,
+  "spread_deg": 14.602863308387343,
+  "lean_deg": 15.557336267238718,
+  "heading_deg": 232.80676757373718,
+  "specular": 0.25,
+  "shadow_strength": 0.7423541455964278,
+  "shadow_blur": 5.092022199219205,
+  "notes": "light cluster fitted to the shadows on the table in the overhead footage (calibration/lighting.py)"
+}

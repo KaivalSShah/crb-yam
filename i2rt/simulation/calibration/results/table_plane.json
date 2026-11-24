@@ -1,0 +1,6 @@
+{
+  "a": 0.03,
+  "b": 0.0,
+  "c": 0.0,
+  "notes": "Table surface in the robot base frame. Chosen so that both the wrist camera's close views of the ball on a cup (calibration/wrist_camera.py) and the recorded grasps (calibration/grasp_events.py) are consistent; see README.md, 'The table is not at z = 0'."
+}

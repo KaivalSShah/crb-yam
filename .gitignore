@@ -93,3 +93,7 @@ i2rt.egg-info/
 scripts/temp_*/
 
 *.mjb
+# Policy checkpoints, evaluation rollouts and run_simulation.py output
+/outputs/
+/run_simulation*.png
+/run_simulation*.mp4
