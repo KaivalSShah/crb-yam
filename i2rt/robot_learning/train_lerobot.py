@@ -43,7 +43,7 @@ def main(args: Args) -> None:
         f"--job_name={args.policy}_{args.dataset_repo_id.split('/')[-1]}",
         f"--batch_size={args.batch_size}",
         f"--steps={args.steps}",
-        "--trackio.enable=false",
+        "--wandb.enable=false",  # lerobot 0.4.x logs through wandb; it has no trackio option
     ]
     print(" ".join(command), flush=True)
     subprocess.run(command, check=True)
